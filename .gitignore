@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# HTML reports (generated outputs, not source)
+*.html
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+/tmp/
+
+# Editor
+.vscode/
+.idea/
+*.swp
