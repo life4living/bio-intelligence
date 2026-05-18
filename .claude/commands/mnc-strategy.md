@@ -5,95 +5,7 @@
 > 用法：`/mnc-strategy Amgen`、`/mnc-strategy 罗氏`、`/mnc-strategy AstraZeneca 肿瘤`
 > 可选参数：公司名后可跟治疗领域（聚焦单一领域的 BD 逻辑分析）。
 
----
-
-## Pre-flight：MCP 连接检查（每次执行前必做）
-
-**在 Step 0 之前**，用探针验证 `pharma_intelligence` MCP 工具是否可用：
-
-```
-ls_ner_nor_normalize(user_input="test")
-```
-
-根据结果判断：
-
-| 结果 | 状态 | 处理 |
-|------|------|------|
-| 返回任意 JSON | ✅ 正常 | 继续 Step 0 |
-| Connection refused / tool not found / MCP disconnected | ❌ 代理未运行 | 输出诊断（见下），**暂停执行**，等用户修复后重发指令 |
-| HTTP 400 / schema validation error | ❌ 代理异常（未过滤 anyOf） | 输出诊断（见下），**暂停执行** |
-| 超时（>60s 无响应） | ⚠️ 网络或服务器繁忙 | 提示用户，等 10s 后重试一次；二次仍超时则暂停 |
-
-**连接失败时输出以下内容，不再继续执行任何 MCP 工具：**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌  MCP 连接失败 — 智慧芽工具不可用
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-在终端（! 前缀可在 Claude Code 中直接运行）执行以下步骤：
-
-  步骤 1 — 检查代理是否在运行：
-  ! lsof -i :3099
-
-  步骤 2 — 若无输出，启动代理：
-  ! python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
-
-  步骤 3 — 在 Claude Code 中验证连接：
-  /mcp   ← 确认 pharma_intelligence 显示 Connected
-
-  步骤 4 — 验证通过后，重新发送本次调研指令。
-
-常见原因速查：
-  • 终端关闭 / 系统休眠       → 代理进程退出，执行步骤 2 重启
-  • 端口 3099 已被占用        → ! lsof -ti :3099 | xargs kill，再重启
-  • python3.10 路径不对       → ! which python3.10 确认，或用完整路径
-  • 400 schema 错误（无代理） → 代理未正确配置，检查 /mcp 端点是否指向 127.0.0.1:3099
-
-详细说明：bio-intelligence/KNOWN_ISSUES.md > MCP Error A / MCP Error D
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-**执行中途 MCP 工具报错（单个工具失败）的处理：**
-- 单次工具调用返回错误（非连接断开）→ 记录为"⚠ MCP数据暂缺"，改用 `ls_web_search` 补充，**不中断整体流程**
-- 同一轮中 3 个以上工具连续失败 → 重新做一次 Pre-flight 探针，判断是否代理已断开
-- 超时但其他工具正常 → 调整该工具 query，缩短结果数量后重试一次（`limit` 从 30→15）
-
----
-
-## 数据可信度框架（Data Governance）
-
-> 与所有 skills 共用。确保每条关键数据来源可溯、可信度透明、不确定信息显式声明。
-
-### 来源分级（Source Tier）
-
-| 等级 | 标记 | 来源类型 | 解释 |
-|------|------|---------|------|
-| **S** | 🟢 S | MCP `*_fetch`（带唯一 ID） | 数据库原始记录，ID 可复现验证 |
-| **A** | 🟢 A | MCP `*_search`（结构化检索） | 经索引结构化数据，ID 列表可追溯 |
-| **B** | 🟡 B | MCP `*_vector_search`（语义检索） | 语义匹配，重要数值应用 fetch 交叉验证 |
-| **W** | 🟡 W | `ls_web_search` 补充 | MCP 无数据时的公开网络信息 |
-| **C** | 🔴 C | Claude 模型推断 / 综合分析 | 非实测数据；必须列出所依赖的具体数据点 |
-
-### 核实验证规则（强制执行）
-
-- **R1 专利悬崖数据**（专利到期日/收入敞口）：来自 `patent_fetch.expiry_date` [S]；收入预测标注 [C] 并列出计算方法
-- **R2 销售额/市场份额**：来自 `financial_report_vector_search` [B] 或公司年报 [W]；点估计附来源年份和区间
-- **R3 BD 交易金额**：来自 `drug_deal_fetch.deal_value` [S]；`disclosed=false` 标注 `[金额未披露]`，禁止推测
-- **R4 战略需求推断**（MNC 想买什么）：整体属于 [C] 级，必须在节首声明，并列出 3 个以上支撑数据点（S/A/B）
-- **R5 MCP 无数据处理链**：MCP 空 → `ls_web_search`(1次) → 仍无则显式写明「数据缺失，以下为推断 [C]」
-
-### 行内标注格式
-
-```
-数值/结论 [等级, 来源ID或工具名]
-```
-例：`专利到期 2028 [S, patent_id: xxx]` | `年销售额 $58亿 [W, AZ年报2024]` | `BD需求：ADC平台 [C, 依据: 管线空白(A)+收购历史(S)]`
-
-### HTML 报告数据透明度要求
-
-- 专利悬崖瀑布图每个数据点标注来源等级（🟢/🟡/🔴）
-- 「战略需求推断」节在卡片中显示 `🔴 综合推断` badge，列出依据清单
-- 报告末尾必含**数据说明节**，包括：来源统计、关键引用列表（含专利ID）、数据缺失清单、推断方法（悬崖计算）、数据截止日期
+📎 **公共模块**：执行前 Read `/Users/nihil/Claude/bio-intelligence/.claude/commands/_shared.md`，加载 Pre-flight 检查、数据治理框架和 HTML 规范。
 
 ---
 
@@ -126,11 +38,13 @@ ls_ner_nor_normalize(user_input="$ARGUMENTS")
 1. `ls_organization_fetch(organization=["<公司名>"])`
 2. `ls_organization_pipeline_fetch(organization=["<公司名>"])` — 公司全管线结构化快照
 3. `ls_drug_search(company=["<公司名>"], highest_phase=["approved"], limit=50)`
-4. `ls_drug_fetch` — 对 Step 2 返回的全部已批准药物批量取详情（分批并行）
 
-**专利**
-5. `ls_patent_search(company=["<公司名>"], patent_core_type=["product_compound"], limit=40)`
-6. `ls_patent_search(company=["<公司名>"], patent_core_type=["new_use"], limit=20)`
+> ⚠ `ls_drug_fetch` 需要已批准药物的 drug_id，**已移至 Step 3**，在收到 Step 2 的 drug_id 后并行执行。
+
+**专利（双轨检索）**
+4. `ls_patent_search(company=["<公司名>"], patent_core_type=["product_compound"], limit=40)`
+5. `ls_patent_search(company=["<公司名>"], patent_core_type=["new_use"], limit=20)`
+6. `patsnap_search(search_strategy=["filter"], filters={"assignees": ["<公司名>"]}, sources=["patent"], topk=30)` ← patsap_patent_search，专利补充
 
 **BD 交易（双向）**
 7. `ls_drug_deal_search(licensor=["<公司名>"], limit=30)`
@@ -155,6 +69,11 @@ ls_ner_nor_normalize(user_input="$ARGUMENTS")
 ---
 
 ### Step 3：深度向量挖掘（并行发出）
+
+**已批准药物详情（从 Step 2 移至此处）**
+```
+ls_drug_fetch(drug_ids=[<Step2 drug_search 返回的全部已批准药物ID>])  — 分批并行，获取销售额/适应症/靶点/PK信息
+```
 
 **Top 产品机制与耐药**
 ```

@@ -50,7 +50,9 @@
       "Bash(python3 -m json.tool)",
       "Bash(git init *)",
       "Bash(git branch *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)"
     ]
   }
 }

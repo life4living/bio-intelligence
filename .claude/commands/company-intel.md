@@ -4,96 +4,7 @@
 > 用法：`/company-intel Amgen`、`/company-intel 恒瑞医药`、`/company-intel Alnylam 小核酸`
 > 可选参数：公司名后可跟模态关键词（聚焦特定技术平台）或"融资"（聚焦投融资分析）。
 
----
-
-## Pre-flight：MCP 连接检查（每次执行前必做）
-
-**在 Step 0 之前**，用探针验证 `pharma_intelligence` MCP 工具是否可用：
-
-```
-ls_ner_nor_normalize(user_input="test")
-```
-
-根据结果判断：
-
-| 结果 | 状态 | 处理 |
-|------|------|------|
-| 返回任意 JSON | ✅ 正常 | 继续 Step 0 |
-| Connection refused / tool not found / MCP disconnected | ❌ 代理未运行 | 输出诊断（见下），**暂停执行**，等用户修复后重发指令 |
-| HTTP 400 / schema validation error | ❌ 代理异常（未过滤 anyOf） | 输出诊断（见下），**暂停执行** |
-| 超时（>60s 无响应） | ⚠️ 网络或服务器繁忙 | 提示用户，等 10s 后重试一次；二次仍超时则暂停 |
-
-**连接失败时输出以下内容，不再继续执行任何 MCP 工具：**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌  MCP 连接失败 — 智慧芽工具不可用
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-在终端（! 前缀可在 Claude Code 中直接运行）执行以下步骤：
-
-  步骤 1 — 检查代理是否在运行：
-  ! lsof -i :3099
-
-  步骤 2 — 若无输出，启动代理：
-  ! python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
-
-  步骤 3 — 在 Claude Code 中验证连接：
-  /mcp   ← 确认 pharma_intelligence 显示 Connected
-
-  步骤 4 — 验证通过后，重新发送本次调研指令。
-
-常见原因速查：
-  • 终端关闭 / 系统休眠       → 代理进程退出，执行步骤 2 重启
-  • 端口 3099 已被占用        → ! lsof -ti :3099 | xargs kill，再重启
-  • python3.10 路径不对       → ! which python3.10 确认，或用完整路径
-  • 400 schema 错误（无代理） → 代理未正确配置，检查 /mcp 端点是否指向 127.0.0.1:3099
-
-详细说明：bio-intelligence/KNOWN_ISSUES.md > MCP Error A / MCP Error D
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-**执行中途 MCP 工具报错（单个工具失败）的处理：**
-- 单次工具调用返回错误（非连接断开）→ 记录为"⚠ MCP数据暂缺"，改用 `ls_web_search` 补充，**不中断整体流程**
-- 同一轮中 3 个以上工具连续失败 → 重新做一次 Pre-flight 探针，判断是否代理已断开
-- 超时但其他工具正常 → 调整该工具 query，缩短结果数量后重试一次（`limit` 从 30→15）
-
----
-
-## 数据可信度框架（Data Governance）
-
-> 与所有 skills 共用。确保每条关键数据来源可溯、可信度透明、不确定信息显式声明。
-
-### 来源分级（Source Tier）
-
-| 等级 | 标记 | 来源类型 | 解释 |
-|------|------|---------|------|
-| **S** | 🟢 S | MCP `*_fetch`（带唯一 ID） | 数据库原始记录，ID 可复现验证 |
-| **A** | 🟢 A | MCP `*_search`（结构化检索） | 经索引结构化数据，ID 列表可追溯 |
-| **B** | 🟡 B | MCP `*_vector_search`（语义检索） | 语义匹配，重要数值应用 fetch 交叉验证 |
-| **W** | 🟡 W | `ls_web_search` 补充 | MCP 无数据时的公开网络信息 |
-| **C** | 🔴 C | Claude 模型推断 / 综合分析 | 非实测数据；必须列出所依赖的具体数据点 |
-
-### 核实验证规则（强制执行）
-
-- **R1 临床数据**（mPFS/OS/ORR/批准日期）：必须来自 `*_fetch` [S]，附 trial_id / drug_id；仅 vector_search 来源标注 `⚠ 待 fetch 验证`
-- **R2 融资数据**（融资金额/估值/投资方）：来自 `organization_fetch` [S] 或 `news_fetch` [A]；推测估值标注 `[C, 公开报道推算]`
-- **R3 BD 交易金额**：来自 `drug_deal_fetch.deal_value` [S]；`disclosed=false` 时标注 `[金额未披露]`，禁止推测
-- **R4 管线评估**（在研药物前景、竞争力分析）：必须标注 `[C]` + 列出至少 2 个 S/A/B 级依据数据点
-- **R5 MCP 无数据处理链**：MCP 空 → `ls_web_search`(1次) → 仍无则显式写明「数据缺失，以下为推断 [C]」
-
-### 行内标注格式
-
-```
-数值/结论 [等级, 来源ID或工具名]
-```
-例：`融资 $200M Series C [A, news_search]` | `管线品种 n=45 [A, drug_search]` | `竞争评级：强 [C, 依据: 管线n(A)+专利n(A)]`
-
-### HTML 报告数据透明度要求
-
-- 数据表格增加「可信度」列：🟢高 🟡中 🔴推断
-- 关键数值附上标引用编号 `[n]`，对应页脚参考列表
-- 推断/估算数据用斜体 + `（推断）` 或 `（估算，±X%）` 标注
-- 报告末尾必含**数据说明节**，包括：来源统计、关键引用列表、数据缺失清单、推断方法说明、数据截止日期
+📎 **公共模块**：执行前 Read `/Users/nihil/Claude/bio-intelligence/.claude/commands/_shared.md`，加载 Pre-flight 检查、数据治理框架和 HTML 规范。
 
 ---
 
@@ -138,8 +49,9 @@ ls_ner_nor_normalize(user_input="$ARGUMENTS")
 5. `ls_clinical_trial_search(company=["<标准化公司名>"], limit=40)`
 6. `ls_clinical_trial_result_search(company=["<标准化公司名>"], limit=20)`
 
-**专利布局**
+**专利布局（双轨检索）**
 7. `ls_patent_search(company=["<标准化公司名>"], limit=30)`
+8. `patsnap_search(search_strategy=["filter"], filters={"assignees": ["<标准化公司名>"]}, sources=["patent"], topk=30)` ← patsap_patent_search，专利全量补充
 
 **BD 交易**
 8. `ls_drug_deal_search(licensor=["<标准化公司名>"], limit=20)`

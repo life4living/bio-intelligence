@@ -4,123 +4,7 @@
 > 用法：`/disease-intel NSCLC`、`/disease-intel 特应性皮炎`、`/disease-intel 2型糖尿病 中国`
 > 可选参数：疾病名后可跟"中国"（聚焦中国市场）或"早期"/"后线"（聚焦特定治疗线）。
 
----
-
-## Pre-flight：MCP 连接检查（每次执行前必做）
-
-**在 Step 0 之前**，用探针验证 `pharma_intelligence` MCP 工具是否可用：
-
-```
-ls_ner_nor_normalize(user_input="test")
-```
-
-根据结果判断：
-
-| 结果 | 状态 | 处理 |
-|------|------|------|
-| 返回任意 JSON | ✅ 正常 | 继续 Step 0 |
-| Connection refused / tool not found / MCP disconnected | ❌ 代理未运行 | 输出诊断（见下），**暂停执行**，等用户修复后重发指令 |
-| HTTP 400 / schema validation error | ❌ 代理异常（未过滤 anyOf） | 输出诊断（见下），**暂停执行** |
-| 超时（>60s 无响应） | ⚠️ 网络或服务器繁忙 | 提示用户，等 10s 后重试一次；二次仍超时则暂停 |
-
-**连接失败时输出以下内容，不再继续执行任何 MCP 工具：**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌  MCP 连接失败 — 智慧芽工具不可用
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-在终端（! 前缀可在 Claude Code 中直接运行）执行以下步骤：
-
-  步骤 1 — 检查代理是否在运行：
-  ! lsof -i :3099
-
-  步骤 2 — 若无输出，启动代理：
-  ! python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
-
-  步骤 3 — 在 Claude Code 中验证连接：
-  /mcp   ← 确认 pharma_intelligence 显示 Connected
-
-  步骤 4 — 验证通过后，重新发送本次调研指令。
-
-常见原因速查：
-  • 终端关闭 / 系统休眠       → 代理进程退出，执行步骤 2 重启
-  • 端口 3099 已被占用        → ! lsof -ti :3099 | xargs kill，再重启
-  • python3.10 路径不对       → ! which python3.10 确认，或用完整路径
-  • 400 schema 错误（无代理） → 代理未正确配置，检查 /mcp 端点是否指向 127.0.0.1:3099
-
-详细说明：bio-intelligence/KNOWN_ISSUES.md > MCP Error A / MCP Error D
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-**执行中途 MCP 工具报错（单个工具失败）的处理：**
-- 单次工具调用返回错误（非连接断开）→ 记录为"⚠ MCP数据暂缺"，改用 `ls_web_search` 补充，**不中断整体流程**
-- 同一轮中 3 个以上工具连续失败 → 重新做一次 Pre-flight 探针，判断是否代理已断开
-- 超时但其他工具正常 → 调整该工具 query，缩短结果数量后重试一次（`limit` 从 30→15）
-
----
-
-## 数据可信度框架（Data Governance）
-
-> 所有 skills 共用。确保报告中每条关键数据来源可溯、可信度透明、不确定信息显式声明。
-
-### 来源分级（Source Tier）
-
-| 等级 | 标记 | 来源类型 | 解释 |
-|------|------|---------|------|
-| **S** | 🟢 S | MCP `*_fetch`（带唯一 ID） | 数据库原始记录，ID 可复现验证 |
-| **A** | 🟢 A | MCP `*_search`（结构化检索） | 经索引的结构化数据，ID 列表可追溯 |
-| **B** | 🟡 B | MCP `*_vector_search`（语义检索） | 语义匹配，可能有上下文漂移；重要数值应用 fetch 交叉验证 |
-| **W** | 🟡 W | `ls_web_search` 补充 | MCP 无数据时的公开网络信息 |
-| **C** | 🔴 C | Claude 模型推断 / 综合分析 | 基于多源数据的判断，非实测数据；必须列出所依赖的具体数据点 |
-
-### 核实验证规则（5条，强制执行）
-
-**R1 — 数值型临床数据**（mPFS / OS / ORR / 批准日期）
-- 来源必须为 S 或 A 级：`clinical_trial_result_fetch`、`drug_fetch.first_approved_date`、`drug_milestone_fetch`
-- 行内标注格式：`数值 [S, ct_result_id: xxx]` 或 `数值 [A, drug_id: xxx]`
-- 仅来自 vector_search 的临床数据：标注 `⚠ 待 fetch 验证` 并尽量补做 fetch
-
-**R2 — 市场 / 流行病学数据**（市场规模、患者人数、发病率）
-- 必须注明：数据机构（GlobalData / EvaluatePharma / 政府报告等）+ 预测年份 + 基准年
-- 中国患者数如需推算，明确写出公式，例如：`全球 × 中国占比系数(~22%)` → 给出区间而非点估计
-- 来自 Claude 训练知识的流行病学数据：标注 `[C, 知识截止 2025-08]`，并用 MCP 结果交叉核查
-
-**R3 — BD 交易金额**
-- 来源：`drug_deal_fetch.deal_value`；若 `disclosed=false` → 在报告中明确标注 `[金额未披露]`
-- 禁止推测未披露交易金额
-
-**R4 — 定性判断**（需求缺口评级、立项机会评分、KOL 认定、竞争强度）
-- 必须标注 `[C]` + 列出所依赖的具体数据点（至少 2 个 S/A/B 级来源）
-- KOL 认定：必须有 MCP paper/news 来源；若仅来自模型知识 → 标注 `[C, 未经 MCP 验证]`
-
-**R5 — MCP 无数据时的处理链**
-1. MCP 返回空 / 错误 → 记录为 `⚠ MCP无数据`
-2. 调用 `ls_web_search`（1次）→ 有结果则标注 `[W, URL/来源]`
-3. 仍无数据 → 在报告中**显式写明**：「此项数据 MCP 及公开网络均未覆盖，以下为模型推断 [C]」
-4. 涉及重要决策的关键数据缺失时，在结论中明确说明该缺失对立项判断的影响
-
-### 行内标注格式（分析 & 报告统一使用）
-
-```
-数值/结论 [等级, 来源ID或工具名]
-```
-
-示例：
-- `mPFS 27.5mo [S, ct_result: 028e294...]` — fetch 获取的试验结果
-- `全球新发 ~220万/年 [B, epidemiology_vector_search]` — 语义检索，有不确定性
-- `市场规模 $783亿(2023) [W, GlobalData via ls_web_search]` — 网络补充
-- `未满足需求：极高 [C, 依据: mPFS<3mo(S) + 无批准SOC(A)]` — 模型判断，依据显式列出
-
-### HTML 报告中的数据透明度要求
-
-1. **每个数据表格**：新增「可信度」列，用 🟢高 🟡中 🔴推断 标注
-2. **页脚参考列表**：`[1] ls_clinical_trial_result_fetch, ID: xxx` 格式，按编号索引
-3. **数据说明节（第 11 节，必含）**：
-   - 数据来源统计（各等级条目数）
-   - 关键数据点引用列表
-   - 数据缺失清单（缺失原因 + 对结论的影响评估）
-   - 推断方法说明
-   - 数据截止日期：`currentDate`
+📎 **公共模块**：执行前 Read `/Users/nihil/Claude/bio-intelligence/.claude/commands/_shared.md`，加载 Pre-flight 检查、数据治理框架和 HTML 规范。
 
 ---
 
@@ -179,14 +63,18 @@ ls_ner_nor_normalize(user_input="$ARGUMENTS")
 **转化医学**
 11. `ls_translational_medicine_search(disease=["<标准化疾病名>"], limit=10)`
 
-**指南与市场**
-12. `ls_clinical_guideline_vector_search(query="<疾病名> treatment guideline first-line standard of care NCCN ESMO", lang="EN", top_k=10)`
-13. `ls_financial_report_vector_search(query="<疾病名> market size revenue forecast patient population commercial", lang="EN", top_k=8)`
+**专利（双轨检索）**
+12. `ls_patent_search(disease=["<标准化疾病名>"], patent_core_type=["product_compound","new_use"], limit=30)`
+13. `patsnap_search(search_strategy=["semantic"], semantic_query="<疾病名> treatment therapeutic mechanism drug target", sources=["patent"], topk=20)` ← patsap_patent_search
 
-**近期动态与里程碑**
-14. `ls_news_vector_search(query="<疾病名> drug approval clinical trial deal breakthrough", lang="EN", top_k=10)`
-15. `ls_drug_milestone_fetch(drug_id=["<Step 4-5中识别的主要在研药物ID>"])` — 关键药物里程碑时间线
-16. `ls_organization_pipeline_fetch(organization=["<关联主要公司名>"])` — 公司全管线快照（补充 drug_search 覆盖）
+**指南与市场**
+14. `ls_clinical_guideline_vector_search(query="<疾病名> treatment guideline first-line standard of care NCCN ESMO", lang="EN", top_k=10)`
+15. `ls_financial_report_vector_search(query="<疾病名> market size revenue forecast patient population commercial", lang="EN", top_k=8)`
+
+**近期动态**
+16. `ls_news_vector_search(query="<疾病名> drug approval clinical trial deal breakthrough", lang="EN", top_k=10)`
+
+> ⚠ `ls_drug_milestone_fetch` 和 `ls_organization_pipeline_fetch` 需要 drug_id / 公司名，**已移至 Step 4**，在此处不发出。
 
 ---
 
@@ -246,7 +134,9 @@ ls_epidemiology_vector_search(query="<疾病名> obesity comorbidity cardiovascu
 
 从 Step 2 和 Step 3 结果中：
 - 取最重要的 **3-5 个靶点** → `ls_target_fetch(target=[...])`（验证每个靶点详情）
-- 取最重要的 **5-8 件专利** → `ls_patent_fetch(patent_ids=[...])`
+- 取关键药物里程碑 → `ls_drug_milestone_fetch(drug_id=[...])`（主要在研品种，此处才有 drug_id）
+- 取关键公司管线 → `ls_organization_pipeline_fetch(organization=[...])`（Step 2 识别的主要公司）
+- 取最重要的 **5-8 件专利** → 优先 `patsnap_fetch(keys=[<专利号>], key_type="pn")` 获取完整 Markdown；备用 `ls_patent_fetch(patent_ids=[...])`
 - 取最重要的 **3-5 篇文献** → `ls_paper_fetch(paper_ids=[...])`（兼作 KOL 通讯作者提取）
 - 取最重要的 **3-5 个交易** → `ls_drug_deal_fetch(drug_deal_ids=[...])`
 - 取关键临床试验 → `ls_clinical_trial_fetch(clinical_trial_ids=[...])`（Phase 3 优先）

@@ -4,96 +4,7 @@
 > 用法：`/target-intel KRAS`、`/target-intel ALK7 siRNA`、`/target-intel KIT 小分子`
 > 可选参数：靶点名后可跟模态关键词（siRNA/小分子/抗体/ADC/PROTAC），影响深度分析方向。
 
----
-
-## Pre-flight：MCP 连接检查（每次执行前必做）
-
-**在 Step 0 之前**，用探针验证 `pharma_intelligence` MCP 工具是否可用：
-
-```
-ls_ner_nor_normalize(user_input="test")
-```
-
-根据结果判断：
-
-| 结果 | 状态 | 处理 |
-|------|------|------|
-| 返回任意 JSON | ✅ 正常 | 继续 Step 0 |
-| Connection refused / tool not found / MCP disconnected | ❌ 代理未运行 | 输出诊断（见下），**暂停执行**，等用户修复后重发指令 |
-| HTTP 400 / schema validation error | ❌ 代理异常（未过滤 anyOf） | 输出诊断（见下），**暂停执行** |
-| 超时（>60s 无响应） | ⚠️ 网络或服务器繁忙 | 提示用户，等 10s 后重试一次；二次仍超时则暂停 |
-
-**连接失败时输出以下内容，不再继续执行任何 MCP 工具：**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌  MCP 连接失败 — 智慧芽工具不可用
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-在终端（! 前缀可在 Claude Code 中直接运行）执行以下步骤：
-
-  步骤 1 — 检查代理是否在运行：
-  ! lsof -i :3099
-
-  步骤 2 — 若无输出，启动代理：
-  ! python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
-
-  步骤 3 — 在 Claude Code 中验证连接：
-  /mcp   ← 确认 pharma_intelligence 显示 Connected
-
-  步骤 4 — 验证通过后，重新发送本次调研指令。
-
-常见原因速查：
-  • 终端关闭 / 系统休眠       → 代理进程退出，执行步骤 2 重启
-  • 端口 3099 已被占用        → ! lsof -ti :3099 | xargs kill，再重启
-  • python3.10 路径不对       → ! which python3.10 确认，或用完整路径
-  • 400 schema 错误（无代理） → 代理未正确配置，检查 /mcp 端点是否指向 127.0.0.1:3099
-
-详细说明：bio-intelligence/KNOWN_ISSUES.md > MCP Error A / MCP Error D
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-**执行中途 MCP 工具报错（单个工具失败）的处理：**
-- 单次工具调用返回错误（非连接断开）→ 记录为"⚠ MCP数据暂缺"，改用 `ls_web_search` 补充，**不中断整体流程**
-- 同一轮中 3 个以上工具连续失败 → 重新做一次 Pre-flight 探针，判断是否代理已断开
-- 超时但其他工具正常 → 调整该工具 query，缩短结果数量后重试一次（`limit` 从 30→15）
-
----
-
-## 数据可信度框架（Data Governance）
-
-> 与所有 skills 共用。确保每条关键数据来源可溯、可信度透明、不确定信息显式声明。
-
-### 来源分级（Source Tier）
-
-| 等级 | 标记 | 来源类型 | 解释 |
-|------|------|---------|------|
-| **S** | 🟢 S | MCP `*_fetch`（带唯一 ID） | 数据库原始记录，ID 可复现验证 |
-| **A** | 🟢 A | MCP `*_search`（结构化检索） | 经索引结构化数据，ID 列表可追溯 |
-| **B** | 🟡 B | MCP `*_vector_search`（语义检索） | 语义匹配，重要数值应用 fetch 交叉验证 |
-| **W** | 🟡 W | `ls_web_search` 补充 | MCP 无数据时的公开网络信息 |
-| **C** | 🔴 C | Claude 模型推断 / 综合分析 | 非实测数据；必须列出所依赖的具体数据点 |
-
-### 核实验证规则（强制执行）
-
-- **R1 临床数据**（mPFS/OS/ORR/批准日期）：必须来自 `*_fetch` [S]，附 trial_id / drug_id；仅 vector_search 来源标注 `⚠ 待 fetch 验证`
-- **R2 市场/流行病学数据**：注明数据机构 + 预测年份；推算数据写明公式和区间；Claude 知识标注 `[C, 截至 2025-08]`
-- **R3 BD 交易金额**：来自 `drug_deal_fetch.deal_value` [S]；`disclosed=false` 时标注 `[金额未披露]`，禁止推测
-- **R4 定性判断**（管线评分、立项评级、KOL 认定）：必须标注 `[C]` + 列出至少 2 个 S/A/B 级依据数据点
-- **R5 MCP 无数据处理链**：MCP 空 → `ls_web_search`(1次) → 仍无则在报告中显式写明「数据缺失，以下为推断 [C]」
-
-### 行内标注格式
-
-```
-数值/结论 [等级, 来源ID或工具名]
-```
-例：`mPFS 27.5mo [S, ct_result: 028e294]` | `市场$78亿 [W, GlobalData]` | `评级：高 [C, 依据: 数据A(S)+数据B(A)]`
-
-### HTML 报告数据透明度要求
-
-- 数据表格增加「可信度」列：🟢高 🟡中 🔴推断
-- 关键数值附上标引用编号 `[n]`，对应页脚参考列表
-- 推断/估算数据用斜体 + `（推断）` 或 `（估算，±X%）` 标注
-- 报告末尾必含**第 11 节：数据说明**，包括：来源统计、关键引用列表、数据缺失清单（缺失原因 + 对结论影响）、推断方法说明、数据截止日期
+📎 **公共模块**：执行前 Read `/Users/nihil/Claude/bio-intelligence/.claude/commands/_shared.md`，加载 Pre-flight 检查、数据治理框架和 HTML 规范。
 
 ---
 
@@ -155,8 +66,9 @@ ls_ner_nor_normalize(user_input="<配体伴侣名>")
 5. `ls_clinical_trial_search(target=["<标准化靶点名>"], limit=30)`
 6. `ls_clinical_trial_result_search(target=["<标准化靶点名>"], limit=15)`
 
-**专利**
+**专利（双轨检索）**
 7. `ls_patent_search(target=["<标准化靶点名>"], patent_core_type=["product_compound","sequence","new_use"], limit=30)`
+8. `patsnap_search(search_strategy=["semantic"], semantic_query="<靶点名> mechanism inhibitor therapeutic target drug discovery", sources=["patent"], topk=20)` ← patsap_patent_search，语义专利补充
 
 **交易与文献**
 8. `ls_drug_deal_search(target=["<标准化靶点名>"], limit=20)`
@@ -249,7 +161,7 @@ ls_patent_sequence_fetch(patent_ids=[<含序列的重要专利ID>])  ← biology
 ```
 ls_patent_vector_search(query="<靶点名> small molecule inhibitor selectivity kinase binding crystal structure", lang="EN", top_k=15)
 ls_patent_vector_search(query="<靶点名> mutation resistance acquired secondary bypass mechanism", lang="EN", top_k=10)
-ls_structure_search(query="<主要临床候选化合物名或已知骨架>", search_type="similarity", limit=20)  ← chemical_molecular，竞品结构相似性
+ls_structure_search(smiles="<候选化合物SMILES>", type="SIM", threshold=0.8, limit=20)  ← chemical_molecular，竞品结构相似性（必须提供 SMILES，type="SIM" 表示相似性搜索）
 ls_structure_fetch(structure_id=<来自structure_search的代表性结构ID>)  ← chemical_molecular，获取结构详情
 ls_chemical_mcs_analyze(smiles_list=["<化合物1 SMILES>", "<化合物2 SMILES>", "<化合物3 SMILES>"])  ← chemical_molecular，最大公共子结构分析（骨架共性识别）
 ls_sar_submit(target="<靶点名>", smiles=["<候选化合物列表>"])  ← chemical_molecular，构效关系分析（异步，需 ls_sar_fetch）
@@ -262,7 +174,7 @@ ls_admet_predict(smiles="<代表性先导化合物SMILES>")  ← chemical_molecu
 ```
 ls_patent_vector_search(query="<靶点名> antibody epitope binding affinity CDR humanization bispecific", lang="EN", top_k=15)
 ls_paper_vector_search(query="<靶点名> antibody drug conjugate payload linker ADC PK ADCP internalization", lang="EN", top_k=10)
-ls_antibody_antigen_search(query="<靶点名> antibody antigen binding epitope affinity", limit=10)  ← biology_modality
+ls_antibody_antigen_search(target_name="<标准化靶点名>", limit=20)  ← biology_modality（参数必须用 target_name=，不能用 query=）
 ls_sequence_search_submit(sequence="<靶点抗原表位关键序列>", search_type="antibody", top_k=20)  ← biology_modality，抗体序列相似性（异步）
 ls_sequence_alignment(sequences=["<候选抗体VH序列>", "<参考抗体VH序列>"])  ← biology_modality，CDR/框架区序列比对
 ```
@@ -274,7 +186,7 @@ ls_sequence_alignment(sequences=["<候选抗体VH序列>", "<参考抗体VH序�
 从 Step 2 和 Step 3 结果中执行批量 fetch，**同时进行数据质量交叉验证**：
 
 **批量拉取（优先级排序）**
-- 取最重要的 **5-8 件专利** ID → `ls_patent_fetch(patent_ids=[...])`
+- 取最重要的 **5-8 件专利** → 优先用 `patsnap_fetch(keys=[<专利号列表>], key_type="pn", module=["basic"])` 获取完整 Markdown；备用 `ls_patent_fetch(patent_ids=[...])`
 - 取最重要的 **3-5 篇文献** ID → `ls_paper_fetch(paper_ids=[...])`
 - 取最重要的 **3-5 个交易** ID → `ls_drug_deal_fetch(drug_deal_ids=[...])`
 - 取最重要的 **2-4 条转化医学** ID → `ls_translational_medicine_fetch(translational_medicine_ids=[...])`
@@ -563,6 +475,7 @@ MCP 数据覆盖：
 | Step 2 | `ls_clinical_trial_search` | 注册试验列表 |
 | Step 2 | `ls_clinical_trial_result_search` | 已发表试验结果 |
 | Step 2 | `ls_patent_search` | 专利结构化检索 |
+| Step 2 | `patsnap_search`（patsap_patent_search） | 语义专利补充检索（与 ls_patent_search 并行） |
 | Step 2 | `ls_drug_deal_search` | BD 交易列表 |
 | Step 2 | `ls_paper_search` | 学术文献 |
 | Step 2 | `ls_translational_medicine_search` | 生物标志物/转化研究 |
@@ -574,7 +487,7 @@ MCP 数据覆盖：
 | Step 3 | `ls_clinical_guideline_vector_search` | 治疗指南 |
 | Step 3 | `ls_fda_label_vector_search` | 说明书（含警告/REMS） |
 | Step 3 | `ls_financial_report_vector_search` | 财报/市场规模 |
-| Step 3 | `ls_antibody_antigen_search` | 抗体-抗原相互作用数据（抗体/ADC 模态） |
+| Step 3 | `ls_antibody_antigen_search` | 抗体-抗原相互作用数据（抗体/ADC 模态，参数：`target_name=`） |
 | Step 3 | `ls_sequence_search_submit` | 序列相似性搜索提交（核酸/抗体模态，异步） |
 | Step 3 | `ls_sequence_search_check_status` | 序列搜索状态查询 |
 | Step 3 | `ls_sequence_search_get_results` | 序列搜索结果获取 |
@@ -590,7 +503,8 @@ MCP 数据覆盖：
 | Step 4 | `ls_drug_fetch` | 药物管线逐条验证（公司/阶段/MOA质控）+ PK/PD完整信息 |
 | Step 4 | `ls_drug_milestone_fetch` | 关键药物里程碑时间线（从Step2移至此） |
 | Step 4 | `ls_organization_pipeline_fetch` | 竞争对手全管线快照（从Step2移至此） |
-| Step 4 | `ls_patent_fetch` | 专利全文 |
+| Step 4 | `patsnap_fetch`（patent_paper_fetch） | 专利/论文完整 Markdown 全文（优先于 ls_patent_fetch） |
+| Step 4 | `ls_patent_fetch` | 专利全文（备用） |
 | Step 4 | `ls_paper_fetch` | 文献全文（兼作 KOL 通讯作者提取） |
 | Step 4 | `ls_drug_deal_fetch` | 交易详情（含终止状态验证） |
 | Step 4 | `ls_translational_medicine_fetch` | 转化医学详情 |
