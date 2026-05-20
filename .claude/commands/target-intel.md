@@ -54,13 +54,30 @@ ls_ner_nor_normalize(user_input="<配体伴侣名>")
 1. `ls_target_fetch(target=["<标准化靶点名>"])`
 2. `ls_disease_fetch(disease=["<关联主要疾病>"])`
 
-**药物管线（主靶点）**
-3. `ls_drug_search(target=["<标准化靶点名>"], limit=40)`
-4. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["approved"], limit=20)`
+**药物管线（主靶点）— 分阶段全量检索**
 
-**【若识别到配体伴侣】药物管线（伴侣靶点）**
+> ⚠ **禁止使用单次 `limit=40` 大查询**：API 返回的 `total` 是全库计数，`limit` 只控制返回记录数；当 total >> limit 时，多余记录被截断，且 API 隐式排序不稳定，导致结果不可重复。例：OX40 total=86, limit=40 → 46条记录永久丢失。
+>
+> **必须按 `highest_phase` 分阶段发出，确保每阶段 total < limit，全量稳定返回。**
+
+并行发出以下查询（主靶点 5 组 + 配体伴侣 5 组，共 10 组，若无配体伴侣则 5 组）：
+
+**主靶点（5组）**
+3a. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["approved","nda_bla"], limit=20)`
+3b. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["phase_3","phase_2_3"], limit=20)`
+3c. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["phase_2"], limit=20)`
+3d. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["phase_1","phase_1_2","early_phase_1"], limit=30)`
+3e. `ls_drug_search(target=["<标准化靶点名>"], highest_phase=["preclinical"], limit=40)` ← 临床前，用于 Step 4 多维评分筛选
+
+**【若识别到配体伴侣】配体伴侣（5组）**
 - `ls_target_fetch(target=["<配体伴侣名>"])`
-- `ls_drug_search(target=["<配体伴侣名>"], limit=30)`
+- `ls_drug_search(target=["<配体伴侣名>"], highest_phase=["approved","nda_bla"], limit=20)`
+- `ls_drug_search(target=["<配体伴侣名>"], highest_phase=["phase_3","phase_2_3"], limit=20)`
+- `ls_drug_search(target=["<配体伴侣名>"], highest_phase=["phase_2"], limit=20)`
+- `ls_drug_search(target=["<配体伴侣名>"], highest_phase=["phase_1","phase_1_2","early_phase_1"], limit=30)`
+- `ls_drug_search(target=["<配体伴侣名>"], highest_phase=["preclinical"], limit=40)`
+
+合并去重后分组：**已批准 → Ph3 → Ph2 → Ph1（全量呈现）**；**临床前 → Step 4 评分筛选 Top 20**。
 
 **临床试验**
 5. `ls_clinical_trial_search(target=["<标准化靶点名>"], limit=30)`
@@ -225,6 +242,49 @@ BD 交易的终止状态可能不同步反映在 `ls_drug_fetch` 的开发商列
 4. 不要仅依赖 `drug_fetch` 的开发商列表判断合作状态
 
 选取标准：专利优先选引用量高/申请人为头部公司/含技术创新的；交易优先选金额最大/最近的。
+
+**临床前管线多维评分与筛选（Top 20）**
+
+对 Step 2（3e 组）返回的全部临床前候选品种，在 Step 4 执行以下评分流程，选出 Top 20 进行 `drug_fetch` 详细记录。
+
+> **设计原则**：临床前品种数量多、数据稀疏，不能全量 fetch；但纯粹按 API 返回顺序取前 N 条会遗漏真正有价值的早期资产。五维评分提供客观排序依据。
+
+**评分维度（每条品种 0–4 分，总分 0–20）**
+
+| 维度 | 满分 | 数据来源 | 评分标准 |
+|------|------|---------|---------|
+| **BD 线索** | 4 | `ls_drug_deal_search`（品种名/公司名）+ `ls_news_vector_search` | 有正式 BD 交易（已签）=4；新闻提及洽谈/LOI=2；无信号=0 |
+| **专利申请时间** | 4 | Step 2 `ls_patent_search` 结果中的申请日字段 | 2024年后申请=4；2022–2023=3；2020–2021=2；2019年前=1；无专利=0 |
+| **MOA 新颖性** | 4 | Claude 判断：与已进入临床的品种 MOA 对比 | 全新作用靶点/机制=4；已知机制但模态创新（如 ADC/PROTAC）=3；同类优化=2；完全同质化=0 |
+| **研究机构影响力** | 4 | `ls_paper_vector_search` 通讯作者/机构 + `ls_organization_fetch` | 顶级学术医学中心（MD Anderson/Mayo/MSKCC/北京协和等）=4；头部企业研发中心=3；区域知名机构=2；无知名机构信号=0 |
+| **文献影响力** | 4 | `ls_paper_search` 返回的引用数/期刊 | IF>10 期刊或引用>100=4；IF 5–10 或引用 30–100=3；IF 2–5=2；仅会议摘要=1；无文献=0 |
+
+**执行步骤**
+
+1. 从 Step 2（3e 组）获取完整临床前品种列表（drug_id + 名称 + 公司）
+2. 对每条品种，**并行**检索以下补充数据（批量发出，1轮内完成）：
+   ```
+   ls_drug_deal_search(drug_name=["<品种名>"], limit=5)        ← BD线索
+   ls_patent_search(target=["<靶点名>"], drug_name=["<品种名>"], limit=5)  ← 专利时间
+   ls_news_vector_search(query="<品种名> deal partnership license", lang="EN", top_k=5)  ← BD新闻
+   ls_paper_vector_search(query="<品种名> preclinical efficacy mechanism", lang="EN", top_k=5)  ← 文献
+   ```
+   > 若临床前品种过多（>30条），先按 API 返回顺序取前 30 条参与评分，避免 context 过载。
+
+3. 依据五维评分表打分，**形成排序表**：
+
+   | 排名 | 品种名 | 公司 | BD线索 | 专利时间 | MOA新颖性 | 机构影响力 | 文献 | 总分 |
+   |------|--------|------|--------|---------|---------|---------|------|------|
+   | 1 | ... | ... | 4 | 3 | 4 | 2 | 3 | 16 |
+   | ... |
+
+4. 取 **总分最高的 Top 20** 品种，执行：
+   ```
+   ls_drug_fetch(drug_ids=["<top20_drug_id列表>"])
+   ```
+   若总分前 20 名中存在明显并列（分差 ≤1），优先选择 BD线索 得分更高的品种。
+
+5. 将 Top 20 临床前品种写入报告管线表，附评分总分列；其余品种以"临床前候选池（共 N 个，已按五维评分筛选）"在备注中说明。
 
 ---
 

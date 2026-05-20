@@ -52,7 +52,19 @@
       "Bash(git branch *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git tag *)"
+      "Bash(git tag *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(gh auth *)",
+      "Bash(ssh *)",
+      "Bash(ssh-keygen -R github.com)",
+      "Bash(ssh-keyscan -t ed25519 github.com)",
+      "Bash(git -C /Users/nihil/Claude/bio-intelligence log --oneline -5)",
+      "Bash(git -C /Users/nihil/Claude/bio-intelligence status)",
+      "Bash(git -C /Users/nihil/Claude/bio-intelligence diff --stat HEAD)",
+      "Bash(git *)",
+      "WebSearch",
+      "mcp__pharma_intelligence__ls_web_search"
     ]
   }
 }
