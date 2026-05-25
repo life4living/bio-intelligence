@@ -83,20 +83,23 @@ ls_ner_nor_normalize(user_input="<配体伴侣名>")
 5. `ls_clinical_trial_search(target=["<标准化靶点名>"], limit=30)`
 6. `ls_clinical_trial_result_search(target=["<标准化靶点名>"], limit=15)`
 
-**专利（双轨检索）**
+**专利（双轨交叉验证 — 必做）**
 7. `ls_patent_search(target=["<标准化靶点名>"], patent_core_type=["product_compound","sequence","new_use"], limit=30)`
-8. `patsnap_search(search_strategy=["semantic"], semantic_query="<靶点名> mechanism inhibitor therapeutic target drug discovery", sources=["patent"], topk=20)` ← patsap_patent_search，语义专利补充
+8. `patsnap_search(search_strategy=["keyword"], keywords=["<标准化靶点名>", "<靶点别名1>", "<靶点别名2>"], sources=["patent"], topk=30)` ← ⚠ **必做交叉验证**：Pharma Intelligence 靶点标注索引对 WO 新公开专利有 6-12 月延迟，patsnap_search 使用全文关键词匹配可捕获遗漏专利
+9. `patsnap_search(search_strategy=["semantic"], semantic_query="<靶点名> mechanism inhibitor therapeutic target drug discovery", sources=["patent"], topk=20)` ← 语义专利补充
+
+> ⚠ **专利覆盖率交叉验证**：将 7（ls_patent_search）与 8-9（patsnap_search）结果按专利号去重对比。若 patsnap_search 出现 ls_patent_search 未收录的专利号（尤其当年和前一年公开的 WO），在报告中标注"⚠ ls_patent_search 未收录，原因为靶点索引延迟"。对管线公司追加 `patsnap_search(keywords=["<公司名>", "<靶点名> antibody patent"])` 确保覆盖公司最新申请。
 
 **交易与文献**
-8. `ls_drug_deal_search(target=["<标准化靶点名>"], limit=20)`
-9. `ls_paper_search(target=["<标准化靶点名>"], limit=15)`
+10. `ls_drug_deal_search(target=["<标准化靶点名>"], limit=20)`
+11. `ls_paper_search(target=["<标准化靶点名>"], limit=15)``
 
 **转化医学与流行病学**
-10. `ls_translational_medicine_search(target=["<标准化靶点名>"], limit=10)`
-11. `ls_epidemiology_vector_search(query="<靶点名> <主要疾病> incidence prevalence patient population", lang="EN", top_k=10)`
+12. `ls_translational_medicine_search(target=["<标准化靶点名>"], limit=10)`
+13. `ls_epidemiology_vector_search(query="<靶点名> <主要疾病> incidence prevalence patient population", lang="EN", top_k=10)`
 
 **近期动态**
-12. `ls_news_vector_search(query="<靶点名> drug clinical trial approval deal", lang="EN", top_k=10)`
+14. `ls_news_vector_search(query="<靶点名> drug clinical trial approval deal", lang="EN", top_k=10)`
 
 **管线覆盖率补充验证（必做）**
 
@@ -211,6 +214,23 @@ ls_sequence_alignment(sequences=["<候选抗体VH序列>", "<参考抗体VH序�
 - 关键新闻条目 → `ls_news_fetch(news_ids=[...])` 获取 Step 2 高相关性新闻的全文详情
 - 若小分子模态已提交 SAR → `ls_sar_fetch(task_id=<id>)` 获取构效关系报告
 - 若核酸模态已提交序列搜索 → `ls_sequence_search_get_results(task_id=<id>)` 获取结果
+
+**专利 Analytics UUID 解析（！必做）**
+
+报告中的专利条目需要 Analytics 链接（`https://analytics.zhihuiya.com/patent-view/abst?patentId={UUID}`），但 `ls_patent_search`/`ls_patent_fetch` 返回的 `patent_id` 为 32 位 hex 格式，不含 UUID 连字符。**必须经 `patsnap_search` 获取 UUID**：
+```
+patsnap_search(search_strategy=["keyword"], keywords=["<专利号>"], sources=["patent"], topk=1)
+```
+从返回结果的 `id` 字段提取 UUID（如 `84e2b026-6a0c-4f71-b8b8-e9f9f2325678`），组装 Analytics 链接。
+
+**管线公司来源文献（！新增必做步骤）**
+
+对每个有管线药物（Phase 1-3/已批准）的公司，**必须检索其来源文献**，因为公司发表论文是管线药物最直接的机理/疗效证据，远比通用靶点生物学论文更有价值：
+```
+ls_paper_search(organization=["<公司名>"], target=["<标准化靶点名>"], limit=10)  ← 公司+靶点交叉
+ls_paper_search(organization=["<公司名>"], limit=10)  ← 公司全部文献（可能含靶点未标注的论文）
+```
+在报告文献节中以"管线公司来源文献"子节独立呈现，标注公司名和管线品种关联。
 
 **药物管线逐条验证（！新增质控步骤）**
 

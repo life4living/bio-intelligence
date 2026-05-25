@@ -10,24 +10,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 所有 skills 均依赖本地 MCP Schema 代理（`mcp_proxy.py`），代理再转发至智慧芽服务器。
 
-**必须先启动代理，再使用任何 skill：**
+**必须先启动全部四个代理，再使用任何 skill：**
 
 ```bash
-# 终端中运行（每次新会话前执行一次）：
-python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
+# 每次新会话前执行一次（四个服务各占一个端口）：
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &                                                    # pharma_intelligence → :3099
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py --port 3100 --upstream https://connect.zhihuiya.com/06e741/logic-mcp &   # biology_modality → :3100
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py --port 3101 --upstream https://connect.zhihuiya.com/713886/logic-mcp &   # chemical_molecular → :3101
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py --port 3102 --upstream https://connect.zhihuiya.com/2b0355/logic-mcp &   # patsap_patent_search → :3102
 
 # 验证代理已就绪：
 /mcp
-# 确认 pharma_intelligence 显示 Connected
+# 确认四个服务均显示 Connected
 ```
 
-> **为什么需要代理？** PatSnap MCP 服务器的 15 个工具在 `inputSchema` 顶层使用了
-> `anyOf`，Claude API 不支持该用法（400 错误）。代理透明地去除顶层 `anyOf` 后
-> 再转发给 Claude Code，不影响工具功能。
-
-代理已配置为本项目 MCP 服务（`http://127.0.0.1:3099/mcp`），无需修改。
-若代理端口冲突，编辑 `mcp_proxy.py` 中的 `PROXY_PORT`，并相应更新：
-`claude mcp remove pharma_intelligence && claude mcp add --transport http pharma_intelligence http://127.0.0.1:<PORT>/mcp`
+> **为什么四个服务都需要代理？** PatSnap 所有 MCP 服务器的工具 `inputSchema` 属性中
+> 均含有 `anyOf`/`oneOf`/`allOf`，Claude API 一律拒绝（400 错误）。
+> `mcp_proxy.py` 透明地递归去除这些 combiner 后再转发给 Claude Code，不影响工具功能。
+> MCP 配置：pharma_intelligence → :3099，biology_modality → :3100，chemical_molecular → :3101，patsap_patent_search → :3102。
 
 ## Skills
 

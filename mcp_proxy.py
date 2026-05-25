@@ -1,32 +1,58 @@
 #!/usr/bin/env python3
 """
-MCP Schema Proxy for PatSnap Pharma Intelligence
+MCP Schema Proxy for PatSnap (all services)
 ─────────────────────────────────────────────────
-PatSnap's MCP server uses anyOf/oneOf/allOf at the TOP level of inputSchema
-for tools that accept multiple optional filter params (meaning "at least one
-required"). The Claude API rejects any request whose tool list contains such
-schemas. This proxy transparently strips those top-level combiners before
-handing tool definitions to Claude Code.
+PatSnap MCP servers use anyOf/oneOf/allOf in inputSchema properties, which
+the Claude API rejects (400 error). This proxy transparently strips those
+combiners before handing tool definitions to Claude Code.
 
 Usage:
-  python3.10 mcp_proxy.py          # starts on 127.0.0.1:3099
+  # pharma_intelligence (port 3099, default)
+  python3.10 mcp_proxy.py
 
-Then configure Claude Code to use this proxy instead of PatSnap directly:
-  claude mcp remove pharma_intelligence
-  claude mcp add --transport http pharma_intelligence http://127.0.0.1:3099/mcp
+  # biology_modality (port 3100)
+  python3.10 mcp_proxy.py --port 3100 --upstream https://connect.zhihuiya.com/06e741/logic-mcp
+
+  # chemical_molecular (port 3101)
+  python3.10 mcp_proxy.py --port 3101 --upstream https://connect.zhihuiya.com/713886/logic-mcp
+
+MCP configuration:
+  claude mcp remove <service> && claude mcp add --transport http <service> http://127.0.0.1:<port>/mcp
 """
 
 import json
-import asyncio
+import os
+import argparse
 import urllib.request
-import urllib.parse
 import ssl
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
 
-UPSTREAM_URL = "https://connect.zhihuiya.com/096456/logic-mcp"
-API_KEY = "sk-3F0NsY7KOt2ZyO72XkgwUIwD80xSfBjCNKp7juA92d0HWpKu"
-PROXY_PORT = 3099
+
+def _load_api_key() -> str:
+    """Return API key from PATSNAP_API_KEY env var, .env file, or fallback."""
+    env_key = os.environ.get("PATSNAP_API_KEY")
+    if env_key:
+        return env_key
+    env_file = Path(__file__).resolve().parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("PATSNAP_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
+APIKEY = _load_api_key()
+
+DEFAULTS = {
+    "upstream": "https://connect.zhihuiya.com/096456/logic-mcp",
+    "port": 3099,
+}
+
+# Filled at startup from CLI args
+UPSTREAM_URL: str = ""
+PROXY_PORT: int = 0
 
 # SSL context that skips verification for corporate proxy environments
 SSL_CTX = ssl.create_default_context()
@@ -35,7 +61,7 @@ SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 def _upstream_url() -> str:
-    return f"{UPSTREAM_URL}?apikey={API_KEY}"
+    return f"{UPSTREAM_URL}?apikey={APIKEY}"
 
 
 def _resolve_combiner(prop: dict) -> dict:
@@ -51,10 +77,23 @@ def _resolve_combiner(prop: dict) -> dict:
             if len(non_null) == 1:
                 # Merge the single non-null option's fields into result
                 for k, v in non_null[0].items():
-                    result[k] = _resolve_combiner(v) if isinstance(v, dict) else v
+                    if k == "properties" and isinstance(v, dict):
+                        result[k] = {pk: _resolve_combiner(pv) for pk, pv in v.items()}
+                    elif k == "items" and isinstance(v, dict):
+                        result[k] = _resolve_combiner(v)
+                    else:
+                        result[k] = _resolve_combiner(v) if isinstance(v, dict) else v
             elif len(non_null) > 1:
-                # Keep the combiner but strip null variants
-                result[combiner] = [_resolve_combiner(o) for o in non_null]
+                # If all options are simple {type: X} schemas, pick the first (API rejects anyOf)
+                all_simple = all(
+                    isinstance(o, dict) and set(o.keys()) <= {"type", "title"}
+                    for o in non_null
+                )
+                if all_simple:
+                    for k, v in non_null[0].items():
+                        result[k] = v
+                else:
+                    result[combiner] = [_resolve_combiner(o) for o in non_null]
             break  # Only handle the first combiner found
     for k, v in prop.items():
         if k in ("anyOf", "oneOf", "allOf"):
@@ -177,11 +216,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PatSnap MCP schema-fix proxy")
+    parser.add_argument("--port", type=int, default=DEFAULTS["port"],
+                        help=f"Local proxy port (default: {DEFAULTS['port']})")
+    parser.add_argument("--upstream", default=DEFAULTS["upstream"],
+                        help="Upstream PatSnap MCP URL (without apikey)")
+    args = parser.parse_args()
+
+    UPSTREAM_URL = args.upstream
+    PROXY_PORT = args.port
+
     server = HTTPServer(("127.0.0.1", PROXY_PORT), ProxyHandler)
-    print(f"PatSnap MCP proxy running on http://127.0.0.1:{PROXY_PORT}/mcp")
-    print("Configure Claude Code:")
-    print("  claude mcp remove pharma_intelligence")
-    print(f"  claude mcp add --transport http pharma_intelligence http://127.0.0.1:{PROXY_PORT}/mcp")
+    print(f"PatSnap MCP proxy  →  http://127.0.0.1:{PROXY_PORT}/mcp")
+    print(f"Upstream: {UPSTREAM_URL}")
     print("Ctrl-C to stop.")
     try:
         server.serve_forever()

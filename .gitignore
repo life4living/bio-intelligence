@@ -15,6 +15,9 @@ __pycache__/
 *.log
 /tmp/
 
+# Secrets
+.env
+
 # Editor
 .vscode/
 .idea/

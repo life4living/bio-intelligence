@@ -1,6 +1,6 @@
 # 已知问题与解决方案汇总
 
-基于实际调研案例（OX40 全模态，2026-05-15）积累的 MCP 工具使用经验。
+基于实际调研案例（OX40 全模态 2026-05-15、SDC2 治疗型 2026-05-23）积累的 MCP 工具使用经验。
 
 ---
 
@@ -132,6 +132,66 @@ Amlitelimab（Sanofi，抗OX40L，Phase 3 COAST-1 2025年9月阳性）未出现�
 
 ---
 
+## Issue 7：`ls_patent_search` 靶点索引延迟导致新公开 WO 专利遗漏
+
+**现象**
+SDC2 调研中，WO2026030235A1（2026-02-05 公开，Yale+VST-Bio）和 WO2025101747A1（2025-05-15 公开，VST-Bio）均可在 `patsnap_search` 检索到，但 `ls_patent_search(target=["SDC2"])` 未返回。
+
+**根因**
+Pharma Intelligence 专利库的靶点标注（`target` 字段）依赖半自动索引，WO 新公开专利存在 6-12 个月延迟。`patsnap_search` 使用全文关键词匹配，无此延迟。
+
+**解决方案**
+1. 专利检索必须双轨交叉验证：`ls_patent_search`（结构化靶点索引）+ `patsnap_search`（全文关键词）
+2. 对管线公司追加 `patsnap_search(keywords=["<公司名>", "<靶点名> patent"])` 确保覆盖公司最新申请
+3. 报告中对 ls_patent_search 未收录的专利标注"⚠ 靶点索引延迟"
+
+**实际案例结果**
+- `ls_patent_search(target=["SDC2"])` 返回 5 件专利
+- `patsnap_search(keywords=["SDC2"])` 额外发现 2 件新公开专利
+- 原因：SDC2 作为极早期靶点（仅 2 个临床前品种），靶点标注优先级低，索引更慢
+
+**skill 更新位置**：Step 2 专利双轨交叉验证（升级为必做）；Step 4 专利 UUID 解析说明
+
+---
+
+## Issue 8：管线公司来源文献缺失
+
+**现象**
+SDC2 报告原有 6 篇核心文献均为靶点生物学论文，缺少 VST-Bio（Ristori 2022 Nat CVR、André 2025 TVST）和 Orbsen（Brady 2020、Alagesan 2022）的公司来源文献。这些论文才是管线药物最直接的机理/疗效证据。
+
+**根因**
+Skill Step 2 的 `ls_paper_search(target=[...])` 只按靶点搜索文献，不按公司搜索。Step 4 虽有 `ls_organization_fetch`，但不检索公司发表的论文。
+
+**解决方案**
+1. Step 4 增加"管线公司来源文献"子步骤：对每个有管线药物的公司并行 `ls_paper_search(organization=["<公司名>"], target=["<靶点名>"])` 和 `ls_paper_search(organization=["<公司名>"])`
+2. 公司来源文献在报告中以"管线公司来源文献"子节独立呈现
+3. 标注公司名和管线品种关联
+
+**实际案例结果**
+- VST-Bio：1 篇直接发表（André 2025）+ Yale 联合发表（Ristori 2022）→ VST-002 的机制基础和 AMD 临床前数据
+- Orbsen：13 篇 MSC 文献，其中 3 篇直接使用 CD362(SDC2) 作为 MSC 分选标记 → VTS-201 的给药方案和制造工艺
+
+**skill 更新位置**：Step 4 新增"管线公司来源文献"必做步骤
+
+---
+
+## Issue 9：专利 Analytics 链接 UUID 获取路径未文档化
+
+**现象**
+生成 Analytics 链接需要 `patentId` UUID（含连字符），但 `ls_patent_search`/`ls_patent_fetch` 返回 `patent_id` 为 32 位 hex（不含连字符），无法直接用于组装 URL。
+
+**根因**
+两个 MCP 服务（pharma_intelligence vs patsnap_patent_search）使用不同的 ID 格式：
+- `ls_patent_search` → `patent_id`: `efc64f575fa942fe8ad756ef95010b72`（32 位 hex）
+- `patsnap_search` → `id`: `84e2b026-6a0c-4f71-b8b8-e9f9f2325678`（UUID with hyphens）
+
+**解决方案**
+对报告需呈现的每个专利号，用 `patsnap_search(keywords=["<专利号>"])` 获取 UUID，然后组装 Analytics 链接。
+
+**skill 更新位置**：Step 4 新增"专利 Analytics UUID 解析"说明
+
+---
+
 ---
 
 # MCP 协议层错误
@@ -140,71 +200,242 @@ Amlitelimab（Sanofi，抗OX40L，Phase 3 COAST-1 2025年9月阳性）未出现�
 
 ---
 
-## MCP Error A：`inputSchema` 顶层 `anyOf` 导致 Claude API 400 错误
+## MCP Error A：`inputSchema` 含 `anyOf/oneOf/allOf` 导致 Claude API 400 错误
 
-**现象**
-Claude Code 启动时或调用任意 `ls_*` 工具时，返回 400 Bad Request。所有工具均不可用，报错信息类似：
+> **2026-05-21 更新**：初版记录仅覆盖 `pharma_intelligence`；经深查发现
+> `biology_modality`（6个工具）和 `chemical_molecular`（2个工具）也存在相同问题。
+> 修复方案已升级为**三服务全代理**，详见"当前修复"节。
+
+---
+
+### 错误现象
+
+调用任意 `ls_*` 工具时，Claude API 返回 400，报错信息：
+
 ```
-Error: 400 {"type":"error","error":{"type":"invalid_request_error",
-"message":"tools.N.custom.input_schema: Input validation error..."}}
+API Error: 400 tools.11.custom.input_schema:
+  input_schema does not support oneOf, allOf, or anyOf at the top level
 ```
 
-**根因**
-智慧芽 MCP server 的 15 个工具在 `inputSchema` **根层**使用了 `anyOf`（或 `oneOf`/`allOf`），其语义是"以下参数至少需要传一个"。例如：
+错误中的序号（`tools.11`）指的是 Claude API 合并所有 MCP 服务后的工具列表中，
+第 12 个（0-indexed）工具的 schema 不合法。**所有工具均无法使用**。
+
+---
+
+### 根因
+
+智慧芽三个 MCP 服务的工具 `inputSchema`，在**属性（properties）层**使用了
+`anyOf/oneOf/allOf`（JSON Schema 组合关键字），通常用于表达"可选参数类型为
+`string | null`"或"多条件至少满足其一"。
+
+Claude API 要求 `inputSchema` 根层必须为 `{ "type": "object" }`，且不允许
+属性值中存在 `anyOf/oneOf/allOf`（即便不在根层）。两者规范不兼容，
+导致工具注册阶段全量失败。
+
+---
+
+### 问题分布（通过直连 MCP 服务端实测，2026-05-21）
+
+以下用 Python 脚本直接调用各服务 `tools/list`，检查每个工具的 schema：
+
+```python
+# 检测脚本（可复用）
+import json, urllib.request, ssl
+
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
+APIKEY = "sk-3F0NsY7KOt2ZyO72XkgwUIwD80xSfBjCNKp7juA92d0HWpKu"
+
+def check_service(name, url):
+    body = json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).encode()
+    req = urllib.request.Request(url, data=body,
+        headers={'Content-Type':'application/json','Accept':'application/json,text/event-stream'},
+        method='POST')
+    with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as r:
+        raw = r.read().decode()
+    for line in raw.splitlines():
+        if line.startswith('data:'):
+            tools = json.loads(line[5:]).get('result', {}).get('tools', [])
+            for t in tools:
+                s = t.get('inputSchema', {})
+                top_bad = any(k in s for k in ('anyOf','oneOf','allOf'))
+                bad_props = [p for p,v in s.get('properties',{}).items()
+                             if isinstance(v,dict) and any(k in v for k in ('anyOf','oneOf','allOf'))]
+                flag = "❌" if (top_bad or bad_props) else "✅"
+                print(f"  {flag} {t['name']} | top={top_bad} | bad_props={bad_props[:3]}")
+```
+
+**实测结果：**
+
+```
+=== pharma_intelligence (096456/logic-mcp) ===  [30个工具，全部经代理]
+  ❌ ls_drug_search        | top=False | bad_props=['drug', 'target', 'disease']
+  ❌ ls_patent_search      | top=False | bad_props=['drug', 'target', 'organization']
+  ❌ ls_clinical_trial_search | top=False | bad_props=['drug', 'target', 'disease']
+  ❌ ls_paper_search       | top=False | bad_props=['drug', 'target', 'disease']
+  ❌ ls_drug_deal_search   | top=False | bad_props=['drug', 'organization', 'target']
+  ... (共约15个工具受影响)
+  ✅ ls_drug_fetch         | top=False | bad_props=[]
+  ✅ ls_patent_fetch       | top=False | bad_props=[]
+  ✅ ls_ner_nor_normalize  | top=False | bad_props=[]
+
+=== biology_modality (06e741/logic-mcp) ===  [8个工具]
+  ❌ ls_sequence_search_submit   | top=False | bad_props=['evalue', 'database', 'perc_identity']
+  ❌ ls_modification_search_submit | top=False | bad_props=['sequence', 'subject_length']
+  ❌ ls_sequence_search_get_results | top=False | bad_props=['order', 'sort_field', 'perc_identity']
+  ❌ ls_antibody_antigen_search  | top=False | bad_props=['filter']
+  ❌ ls_sequence_alignment       | top=False | bad_props=['query_sequence']
+  ❌ ls_patent_sequence_fetch    | top=False | bad_props=['pn', 'patent_id']
+  ✅ ls_sequence_search_check_status | top=False | bad_props=[]
+  ✅ ls_sequence_fetch           | top=False | bad_props=[]
+
+=== chemical_molecular (713886/logic-mcp) ===  [7个工具]
+  ❌ ls_structure_search         | top=False | bad_props=['threshold']
+  ❌ ls_patent_structure_fetch   | top=False | bad_props=['pn', 'patent_id']
+  ✅ ls_admet_predict            | top=False | bad_props=[]
+  ✅ ls_chemical_mcs_analyze     | top=False | bad_props=[]
+  ✅ ls_structure_fetch          | top=False | bad_props=[]
+  ✅ ls_sar_submit               | top=False | bad_props=[]
+  ✅ ls_sar_fetch                | top=False | bad_props=[]
+```
+
+**受影响工具汇总：pharma_intelligence ~15 个 + biology_modality 6 个 + chemical_molecular 2 个**
+
+---
+
+### 具体 Schema 示例（以 `ls_patent_sequence_fetch` 为例）
+
 ```json
+// 原始 schema（biology_modality，Claude API 拒绝）
 {
-  "inputSchema": {
-    "anyOf": [
-      { "required": ["drug_name"] },
-      { "required": ["target"] },
-      { "required": ["organization"] }
-    ],
-    "properties": { ... }
+  "properties": {
+    "patent_id": {
+      "anyOf": [{"type": "string"}, {"type": "null"}],  // ← 问题在这里
+      "description": "Patent ID used to fetch related sequences.",
+      "title": "Patent Id"
+    },
+    "pn": {
+      "anyOf": [{"type": "string"}, {"type": "null"}],  // ← 同上
+      "description": "Patent number ...",
+      "title": "Pn"
+    }
   }
 }
-```
-Claude API（Anthropic）的工具规范要求 `inputSchema` **根层必须是 `type: object`**，不允许在根层使用 JSON Schema 组合关键字（`anyOf/oneOf/allOf`）。这是 Claude API 的设计约束，而非智慧芽的单方面问题。但两者规范不兼容，导致注册工具时全量失败。
 
-**解决方案（当前）：临时 Workaround**
-在本地运行 `mcp_proxy.py`，代理拦截 `tools/list` 响应并在返回给 Claude Code 之前：
-1. 剥离 `inputSchema` **根层**的 `anyOf/oneOf/allOf`
-2. 递归处理嵌套属性中的 `anyOf/oneOf/allOf`（`[real_type, null]` → `real_type`）
-
-```bash
-# 每次新会话前执行：
-python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
-```
-
-代理运行在 `http://127.0.0.1:3099/mcp`，已配置为 Claude Code 的 MCP 端点。
-
-**解决方案性质**：**临时（Workaround）**
-- 优点：完全透明，不影响工具功能；不修改上游服务器
-- 缺点：每次新会话需手动启动代理；代理进程意外退出后工具全部失效；需要 Python 3.10+ 环境
-- 不稳定场景：代理端口被占用（换 `PROXY_PORT`）；MCP 协议版本升级后 SSE 格式变化
-
-**永久解决方案（需 PatSnap 配合）**
-智慧芽需将工具的 `inputSchema` 改为符合 Claude API 规范的格式：
-```json
-// 修改前（当前，Claude API 不支持）
+// 代理修复后（Claude API 接受）
 {
-  "inputSchema": {
-    "anyOf": [{"required": ["drug_name"]}, {"required": ["target"]}],
-    "properties": { "drug_name": {...}, "target": {...} }
-  }
-}
-
-// 修改后（标准写法：所有参数设为可选，description 说明约束）
-{
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "drug_name": { "type": "string", "description": "Drug name (required if target not provided)" },
-      "target": { "type": "string", "description": "Target gene (required if drug_name not provided)" }
+  "properties": {
+    "patent_id": {
+      "type": "string",      // anyOf [string, null] → string（非必填由 required 控制）
+      "description": "Patent ID used to fetch related sequences.",
+      "title": "Patent Id"
+    },
+    "pn": {
+      "type": "string",
+      "description": "Patent number ...",
+      "title": "Pn"
     }
   }
 }
 ```
-这不会损失任何功能，服务端仍可在收到请求后做参数校验。
+
+---
+
+### 当前修复：三服务全代理（2026-05-21）
+
+**代理脚本**：`/Users/nihil/Claude/bio-intelligence/mcp_proxy.py`（支持 `--port`/`--upstream` 参数）
+
+**修复原理**（`fix_input_schema` 函数）：
+1. 剥离 `inputSchema` 根层的 `anyOf/oneOf/allOf`
+2. 递归遍历 `properties`，将 `anyOf: [real_type, null]` → `real_type`
+3. 多于一个非 null 选项时保留（不能简化），但实践中未见此情况
+
+**每次新会话启动命令（三条）：**
+
+```bash
+# pharma_intelligence → 端口 3099（30个工具）
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py &
+
+# biology_modality → 端口 3100（8个工具）
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py \
+  --port 3100 \
+  --upstream https://connect.zhihuiya.com/06e741/logic-mcp &
+
+# chemical_molecular → 端口 3101（7个工具）
+python3.10 /Users/nihil/Claude/bio-intelligence/mcp_proxy.py \
+  --port 3101 \
+  --upstream https://connect.zhihuiya.com/713886/logic-mcp &
+```
+
+**Claude Code MCP 配置（已配置，无需重做）：**
+
+| 服务名 | 配置端点 | 原直连地址 |
+|--------|---------|-----------|
+| `pharma_intelligence` | `http://127.0.0.1:3099/mcp` | `096456/logic-mcp` |
+| `biology_modality` | `http://127.0.0.1:3100/mcp` | `06e741/logic-mcp` |
+| `chemical_molecular` | `http://127.0.0.1:3101/mcp` | `713886/logic-mcp` |
+
+**验证代理已就绪（修复后测试数据）：**
+
+```bash
+# 验证 biology_modality 代理（最关键，之前直连有问题）
+curl -s --max-time 5 -X POST http://127.0.0.1:3100/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+# 预期返回: data: {"result":{"serverInfo":{"name":"..."}}}  → ✅
+
+# 验证 schema 修复效果（Python）
+python3.10 -c "
+import json, urllib.request
+for name, port in [('biology_modality',3100),('chemical_molecular',3101)]:
+    url = f'http://127.0.0.1:{port}/mcp'
+    body = json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).encode()
+    req = urllib.request.Request(url, data=body,
+        headers={'Content-Type':'application/json'}, method='POST')
+    with urllib.request.urlopen(req, timeout=30) as r:
+        raw = r.read().decode()
+    for line in raw.splitlines():
+        if line.startswith('data:'):
+            tools = json.loads(line[5:]).get('result',{}).get('tools',[])
+            bad = [t['name'] for t in tools if
+                   any(k in t.get('inputSchema',{}).get('properties',{}).get(p,{})
+                       for p in t.get('inputSchema',{}).get('properties',{})
+                       for k in ('anyOf','oneOf','allOf'))]
+            print(f'{name}: {len(tools)} tools — {\"✅ all clean\" if not bad else \"❌ still bad: \"+str(bad)}')
+"
+# 预期输出:
+# biology_modality: 8 tools — ✅ all clean
+# chemical_molecular: 7 tools — ✅ all clean
+```
+
+**真实端到端验证（2026-05-21 实测）：**
+调用 `ls_patent_sequence_fetch(pn="WO2023045977A1")` → 返回 49 条蛋白序列，无 400 错误。
+
+---
+
+### 问题历史（Timeline）
+
+| 日期 | 事件 |
+|------|------|
+| 2026-05-15 之前 | 初次发现 pharma_intelligence 直连报 400，编写代理 mcp_proxy.py，配置端口 3099 |
+| 2026-05-21 | 再次出现 400 错误。排查发现 biology_modality（6工具）和 chemical_molecular（2工具）直连未经代理。CLAUDE.md 中"直连无问题"的记录是错误的 |
+| 2026-05-21 | mcp_proxy.py 改造支持 `--port`/`--upstream` 参数；新增 :3100/:3101 两个代理实例；MCP 配置更新；CLAUDE.md 修正 |
+
+---
+
+### 解决方案性质评估
+
+| 维度 | 评估 |
+|------|------|
+| **稳定性** | 中等。代理进程无守护，会话重启后需手动重启 |
+| **透明度** | 高。代理仅修改 `tools/list` 响应，工具实际调用原样透传 |
+| **安全性** | 低风险。跳过 SSL 验证（见 MCP Error B），本机内网环境可接受 |
+| **可扩展性** | 好。新增服务只需新端口，一个脚本统一管理 |
+
+**永久解决方案（需 PatSnap 配合）**：
+将属性中的 `anyOf: [{"type": "string"}, {"type": "null"}]` 改为 `{"type": "string"}`，
+将可选性通过 `required` 数组控制而非 `anyOf`。此修改对服务端零影响。
 
 **如何向 PatSnap 反馈（见文末"反馈渠道"节）**
 
@@ -393,3 +624,6 @@ launchctl load ~/Library/LaunchAgents/com.local.mcp-proxy.plist
 | BD 合作状态 | `ls_drug_deal_fetch` status + 新闻 | `ls_drug_deal_search` 标题 | `ls_drug_fetch` organization |
 | 药物存在性 | `ls_drug_search` 精确匹配 | `ls_news_vector_search` + `ls_web_search` | Claude 训练知识 |
 | 交易金额 | `ls_drug_deal_fetch` 详情 | `ls_drug_deal_search` 摘要 | 新闻 |
+| 专利覆盖 | `ls_patent_search` + `patsnap_search` 交叉验证 | `patsnap_search` 全文匹配 | `ls_patent_search` 单独使用 |
+| 专利 UUID | `patsnap_search` 的 `id` 字段 | — | `ls_patent_search` 的 `patent_id`（格式不兼容） |
+| 公司文献 | `ls_paper_search(organization+target)` | `ls_paper_search(organization)` | `ls_paper_search(target)` 通用 |
